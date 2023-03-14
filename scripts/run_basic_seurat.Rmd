@@ -1,0 +1,355 @@
+---
+title: "Basic single-cell RNA-seq analysis"
+author: "Eijy Nagai"
+date: "2023-03-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+As this tutorial is intended for beginners, our focus will be on teaching how to utilize Seurat to analyze scRNA-seq data in R. 
+The main functions are from Seurat package, where you can find the official tutorial from Satija Lab at https://satijalab.org/seurat/articles/pbmc3k_tutorial.html
+
+This tutorial assumes that the sequencing data preprocessing steps, including base calling, mapping and read counting, have been done.
+
+Before downloading the data, first create the directory `dataset/pbmc3k`. Then, download the data and extract into the mentioned place.
+
+Data can be found in the original [tutorial](https://satijalab.org/seurat/articles/pbmc3k_tutorial.html) or can be obtained [here](https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz). 
+
+Let's install necessary packages:
+```{r}
+# mask require, check and download if not installed
+require2 <- function(x) { 
+  if (!base::require(x, character.only = TRUE)) {
+    install.packages(x, dep = TRUE) ; 
+    base::require(x, character.only = TRUE)
+    } 
+  base::library(x, character.only = TRUE)
+  #do.call("library", list(x))
+  }
+require2("Seurat")
+require2("tidyverse")
+require2("patchwork")
+#require2("BiocManager")
+#BiocManager::install("dittoSeq", update = FALSE)
+```
+
+
+
+
+```{r}
+suppressPackageStartupMessages({
+    library(Seurat)
+    library(tidyverse)
+    #library(reticulate)
+    library(patchwork)
+})
+```
+
+## Load the data
+
+Read in the data and create a file in a 'Seurat object' format.
+
+```{r}
+dirname <- "datasets/pbmc3k/filtered_gene_bc_matrices/hg19/"
+counts_matrix <- Read10X(data.dir = dirname)
+so <- CreateSeuratObject(counts = counts_matrix)
+so
+```
+
+The purpose of the Read10X function is to import the matrix and update its row names and column names with gene symbols and cell barcodes, correspondingly.
+Let's have a look on the data
+
+```{r}
+counts_matrix[c("CD3D", "TCL1A", "MS4A1", "MYC"), 1:50]
+```
+
+## Quality control
+
+After creating the Seurat object, the next step is to do quality control on the data. The most common quality control is to filter out cells that do not reach a threshold.
+
+Which cells should we remove?
+Cells that show a low number of detected genes are likely to be insufficiently sequenced to ensure reliable characterization. Conversely, cells exhibiting an excessive number of detected genes may indicate doublets or multiplets, where multiple cells are present in the same droplet and share the same cell barcode. Additionally, cells with a high percentage of mitochondrial transcripts are typically indicative of stress-induced conditions (such as hypoxia) resulting in the production of large numbers of mitochondria. However, there is also evidence suggesting that certain mitochondrial transcripts contain stable poly-A tails which serve as a degradation marker. As a result, cells with a high mitochondrial transcript percentage may also produce an unusually large amount of truncated mitochondrial transcripts.
+
+It is important to recognize that a universal set of filtering criteria does not exist due to significant variation in normal ranges for these metrics depending on sample origin, reagents, and sequencing depths. As a suggestion, it may be best to solely filter out outlier cells that exhibit QC metrics that clearly deviate from the majority of cells. To achieve this, it is necessary to first understand how these values are distributed within the data. One approach is to create a violin plot for each metric, allowing for visualization of the distribution.
+
+```{r}
+so[["percent_mt"]] <- PercentageFeatureSet(so, pattern = "^MT[-\\.]")
+VlnPlot(so, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+```
+Ok, so after looking to these plots, how to set a cutoff to remove outliers?
+
+
+
+```{r, fig.width=10, fig.height=4}
+plot1 <- FeatureScatter(so, feature1 = "nCount_RNA", feature2 = "percent_mt")
+plot2 <- FeatureScatter(so, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+On left side we can observe correlation between transcript number and mitochondrial content. 
+And on the right side, we can observe the correlation of gene number and transcript number.
+
+Due to a high correlation between gene number and RNA counts, we can set a cutoff combining the percentage of mitochondrial content to set a threshold.
+
+```{r}
+so <- subset(so, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent_mt < 5)
+```
+
+
+
+## Normalization
+
+In a similar fashion to bulk RNA-seq, the amount of RNA captured in each cell varies, hence, it is not appropriate to directly compare the number of transcripts captured for each gene between cells. To overcome this issue, a normalization step is required to make gene expression levels between different cells comparable. The most commonly used normalization method in scRNA-seq data analysis is quite similar to the concept of TPM (Transcripts Per Million reads). It involves normalization of the feature expression measurements for each cell to the total expression, followed by multiplication with a scale factor (usually set to 10,000 by default). The resulting expression levels are then log-transformed to ensure a better fit to a normal distribution. It should be noted that prior to log-transformation, a pseudocount of one is added to all values to ensure that genes with zero transcripts detected in a cell still have non-zero values after log-transformation.
+
+```{r}
+so <- NormalizeData(so)
+```
+
+## Feature selection
+
+The major advantage of scRNA-seq over bulk RNA-seq is its ability to explore the cellular heterogeneity of samples by identifying cell populations with unique molecular signatures. However, not all genes contribute equally to the identification of different cell populations. Genes with low expression levels or those with similar expression levels across all cells may not provide significant information and could blur the differences between distinct cell groups. Therefore, selecting relevant features is necessary before delving further into scRNA-seq data analysis.
+
+In scRNA-seq data analysis, specifically in Seurat, the process involves identifying highly variable genes/features. These are genes with the most diverse expression levels across cells.
+
+```{r}
+so <- FindVariableFeatures(so, nfeatures = 3000)
+```
+By default, Seurat computes the standardized variance of each gene across cells and selects the top 2000 highly variable features. To alter the number of highly variable features, the nfeatures option can be specified, such as choosing the top 3000 genes.
+
+Determining the optimal number of highly variable features is subjective, and it may require several iterations to achieve the clearest and most interpretable outcome. Typically, a value between 2000 to 5000 is sufficient, and adjusting this value minimally affects the results.
+
+While optional, a variable feature plot can visualize the outcome.
+
+```{r, fig.width=12, fig.height=4}
+top_features <- head(VariableFeatures(so), 20)
+plot1 <- VariableFeaturePlot(so)
+plot2 <- LabelPoints(plot = plot1, points = top_features, repel = TRUE)
+plot1 + plot2
+```
+
+
+## Scale the data
+To avoid the bias towards highly expressed genes in the analysis, a scaling is applied to the data using selected features, as different genes have varying base expression levels and distributions that influence their contribution. This is a crucial step to ensure that the analysis is not dependent solely on highly expressed genes, and is a common practice in any data science field.
+
+```{r}
+so <- ScaleData(so)
+```
+
+At this step, one can also remove unwanted sources of variation from the data set by setting the parameter var.to.regress. For instance,
+
+
+
+```{r}
+so <- ScaleData(so, vars.to.regress = c("nFeature_RNA", "percent_mt"))
+```
+
+It is common to remove certain variables, such as the number of detected genes/transcripts (nFeature_RNA / nCount_RNA), mitochondrial transcript percentage (percent_mt), and cell cycle related variables, in order to avoid the influence of their different base expression levels and distributions on the analysis. This is achieved by performing a linear regression, where the normalized expression level of a gene is the dependent variable, and the variables to be removed are the independent variables. The residuals obtained after this regression represent the signals with the linear effect of the considered variables removed. However, it should be noted that this process can significantly slow down the analysis, and may not always be satisfactory as the unwanted variation may not be linear. Therefore, it is recommended to not perform any regression in the first iteration of data exploration, but rather examine the results and, if necessary, regress out specific variables to improve the outcome.
+
+
+## Principal Component Analysis (PCA)
+
+It is strongly recommended and sometimes considered compulsory to apply a linear dimension reduction after identifying highly variable genes and scaling the data, before doing any further analysis. The benefits of doing such a dimension reduction include, but are not limited to:
+
+1. The data becomes much more compact, which makes computation much faster.
+2. As scRNA-seq data is inherently sparse, summarizing measurements of related features greatly enhances the signal robustness.
+
+```{r}
+so <- RunPCA(so, npcs = 50)
+```
+DimHeatmap() is a valuable tool in exploring the primary sources of heterogeneity in a dataset, and can aid in determining which PCs to use for downstream analysis. The function orders both cells and features based on their PCA scores, making it easy to identify patterns of correlation. Additionally, users can set the number of cells to plot, which can be particularly useful for large datasets. While this may be considered a supervised analysis, we have found it to be an effective way to explore correlated feature sets.
+
+```{r}
+DimPlot(so, reduction = "pca")
+```
+
+The number of principal components (PCs) that can be calculated for a dataset equals the smaller value between the number of highly variable genes and the number of cells. However, most of these PCs do not provide informative differences among cell populations and represent random noise. Seurat addresses this issue by using truncated PCA to only calculate the top PCs, with the default being the top 50 PCs, although the number can be changed using the npcs parameter.
+
+Despite this, it is not necessary to use all the calculated PCs. Determining the number of top PCs to use is subjective, and there is no standard approach. One common method is the elbow plot, which involves plotting the explained variation against each PC and selecting the elbow point on the curve as the number of PCs to use.
+
+```{r}
+ElbowPlot(so, ndims = ncol(Embeddings(so, "pca")))
+```
+
+Basically, when we do analysis on scRNA-seq data, we want to find out how different the cells are from each other. To do that, we need to reduce the dimensionality of the data by calculating the top principal components (PCs) that represent the differences between cell populations.
+
+But we don't need to calculate all possible PCs because most of them are just random noise. Instead, Seurat uses truncated PCA to only calculate the top 50 PCs by default. Then, we need to decide on the number of top PCs to use for further analysis. There's no one-size-fits-all rule for this, but we can use the elbow plot method to pick the number of PCs that capture the 'real' signal related to biological differences between cell populations.
+
+The curve of the elbow plot drops dramatically for the first few PCs, then slows down and becomes pretty flat. The first phase of the curve represents the 'real' signal, while the second phase mostly represents technical variation or the stochastic nature of individual cells. So, we usually pick the top 10 PCs, and anything lower than 20 is probably unnecessary.
+
+However, this method isn't perfect. It's hard to precisely define the elbow point, and sometimes there's interesting but weak signal buried in the noise that shows up in lower-ranked PCs. There's also another procedure called JackStraw, but it's slow and doesn't provide much more information than the elbow plot.
+
+Besides using the elbow plot, we can also look at which genes are contributing to each of the top PCs. This can help us understand the biological implication of each PC and pick those representing useful information.
+
+
+```{r, fig.width=10, fig.height=12}
+PCHeatmap(so, dims = 1:20, cells = 300, balanced = TRUE, ncol = 4)
+```
+
+It is imperative to note that selecting only the principal components (PCs) represented by the "interesting" genes is not recommended. Such an approach carries the risk of overlooking interesting yet unexpected phenomena.
+
+In the example at hand, we will employ the top 20 PCs for subsequent analysis. However, it is worth emphasizing that determining the optimal number of PCs to use typically involves an iterative process. As a general rule, a PC range of 10 to 50 is often deemed reasonable for most datasets, although the extent to which this affects the conclusions drawn should be approached with caution.
+
+
+
+
+## Non-linear dimension reduction for visualization
+Linear dimension reduction offers both advantages and disadvantages. On the positive side, since each principal component (PC) is a linear combination of gene expression, interpreting the PCs is straightforward. Furthermore, the data is compressed without being distorted, allowing much of the information to be preserved. On the negative side, more than 10 PCs are usually needed to capture most of the information, which is acceptable for most analyses, but not for visualization over three dimensions.
+
+To address this limitation, non-linear dimension reduction techniques have been introduced. The two most commonly used non-linear methods in single-cell RNA sequencing (scRNA-seq) data analysis are t-distributed Stochastic Neighbor Embedding (t-SNE) and Uniform Manifold Approximation and Projection (UMAP). Both methods aim to position every sample, in this case, cell, in a low-dimensional space (2D/3D) where distances or neighborhood relationships between different samples in the original space are largely retained in the low-dimensional space. Although the detailed mathematical descriptions of these methods are beyond the scope of this tutorial, those who are interested may check this video for t-SNE and this blog post by Nikolay Oskolkov for UMAP. Other methods for creating low-dimensional embeddings for visualization, such as SPRING and PHATE, also exist.
+```{r}
+so <- so %>% 
+        RunTSNE(dims = 1:20) %>%
+        RunUMAP(dims = 1:20)
+```
+
+
+
+
+
+
+
+
+
+
+```{r, fig.width=10, fig.height=30}
+
+pbmc_marker_genes <- c("CD3D", "CD8A", "CD79A", "CD19", "CD14", "LYZ", "FCGR3A", "MS4A1", "CD4", "CD2", "NCAM1", "IL7R", "CCR7", "S100A4", "GNLY", "NKG7", "KLRB1", "FCER1A", "CST3")
+
+plot1 <- FeaturePlot(so, pbmc_marker_genes,
+                     ncol=3, reduction = "tsne")
+plot2 <- FeaturePlot(so, pbmc_marker_genes,
+                     ncol=3, reduction = "umap")
+plot1 / plot2
+```
+
+CD3D, CD3E, CD3G: T cells
+CD14, CD16, CD163: monocytes
+CD19: B cells
+CD56: natural killer cells
+CD235a (also known as glycophorin A): red blood cells
+
+
+## Cell clustering
+
+Starting with feature plots of markers is a common initial step when exploring scRNA-seq data. However, to gain a more comprehensive understanding of the underlying heterogeneity in the data, it is necessary to identify cell groups in an unbiased manner. Clustering can achieve this, and while any clustering method can theoretically be applied to scRNA-seq data, the large sample size and sparseness of the data make it impractical to use methods such as hierarchical clustering and k-means. 
+
+Similar to the PhenoGraph approach, the first step is to create a KNN graph using the Euclidean distance in PCA space. The edge weights between cells are then adjusted based on the degree of overlap in their local neighborhoods, as measured by Jaccard similarity. This process is executed using the FindNeighbors() function, which requires the dimensionality of the dataset (first 20 PCs) as input.
+
+```{r}
+so <- FindNeighbors(so, dims = 1:20)
+```
+
+Once the network is built, the louvain community identification algorithm is employed to search for communities within the network. These communities represent groups of cells that are strongly connected with each other, while connections between cells in different communities are sparse.
+
+```{r}
+so <- FindClusters(so, resolution = 0.5)
+```
+
+The resolution parameter is utilized to determine whether to retrieve major and broad cell groups (e.g., major cell types), or smaller and more detailed cell groups (e.g., cell subtypes). This commonly used parameter ranges between 0.1 and 1, and the optimal option largely depends on the analysis's objective. To obtain a more detailed clustering, a high resolution parameter is employed, and multiple FindClusters function runs can be conducted with varying resolutions. The latest clustering outcome can be retrieved using Idents(so) or so@active.ident, whereas other clustering results are stored as different columns in the meta.data slot (so@meta.data).
+
+Afterward, the clustering outcome is visualized using the previously generated tSNE and UMAP embeddings.
+
+```{r, fig.width=10, fig.height=4}
+plot1 <- DimPlot(so, reduction = "tsne", label = TRUE)
+plot2 <- DimPlot(so, reduction = "umap", label = TRUE)
+plot1 + plot2
+```
+
+
+## Cell Annotation
+
+Assigning an identity label to each cell through clustering assumes that cells with the same label are similar and can be classified as the same cell type or cell state. However, determining the exact cell types or states represented by these clusters is not a simple task, and there is often no definitive answer. Various approaches can be employed to address this issue, such as:
+
+Examining the expression of canonical cell type and state markers in the clusters.
+Identifying signature genes or marker genes for each cluster and conducting literature searches, enrichment analysis, or experimental validation (or seeking input from experts) for annotation based on these markers.
+Comparing the gene expression profile of each cluster with existing reference data.
+
+The first method necessitates prior knowledge of the system being studied, and requires a list of established markers accepted by the scientific community. For the cerebral organoid dataset used as an example, some markers have already been listed. However, a more extensive list (though never comprehensive) includes:
+
+Cluster ID	Markers	Cell Type
+0	IL7R, CCR7	Naive CD4+ T
+1	CD14, LYZ	CD14+ Mono
+2	IL7R, S100A4	Memory CD4+
+3	MS4A1	B
+4	CD8A	CD8+ T
+5	FCGR3A, MS4A7	FCGR3A+ Mono
+6	GNLY, NKG7	NK
+7	FCER1A, CST3	DC
+8	PPBP	Platelet
+
+
+```{r}
+known_markergenes <- c("IL7R", "CCR7", "CD14", "LYZ", "S100A4", "MS4A1", "CD8A", "FCGR3A", "MS4A7", "GNLY", "NKG7", "FCER1A", "CST3", "PPBP")
+DoHeatmap(so, features = known_markergenes) + NoLegend()
+```
+
+To achieve a more impartial annotation or in case there is no known marker genes, the next step is to identify markers for each cell cluster. Seurat provides a function called FindAllMarkers that performs differential expression analysis (using Wilcoxon's rank sum test) between cells within a cluster and those in other clusters.
+
+```{r}
+allmarkers <- FindAllMarkers(so, only.pos = TRUE, min.pct = 0.25, logfc.threshold = log(1.2))
+allmarkers %>% group_by(cluster) %>%
+    top_n(n = 2, wt = avg_log2FC)
+```
+
+Due to the unique characteristics of scRNA-seq data, where each cell represents a single sample, it is crucial to not solely rely on p-values when interpreting the results of differential expression analysis. Instead, it is recommended to also consider other factors such as the detection rate of the gene in the cluster (pct) and the fold change (logfc) between cells within and outside of the cluster. Therefore, the FindAllMarkers function in Seurat includes options such as min.pct and logfc.threshold, which allow users to set thresholds for the effect size.
+
+```{r, fig.width=5, fig.height=8}
+top10 <- allmarkers %>% group_by(cluster) %>%
+              top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(so, features = top10$gene) + NoLegend()
+```
+
+To gain further insight into the markers of different clusters, one may perform feature or violin plots. This approach is useful when a heatmap or two clusters are quite similar. For example, "CD14" and "LYZ" can be used as robust markers for cluster 1, thus warranting a more detailed examination.
+
+```{r,  fig.width=5, fig.height=7}
+plot1 <- FeaturePlot(so, c("CD14","LYZ"), ncol = 1)
+plot2 <- VlnPlot(so, features = c("CD14","LYZ"), pt.size = 0)
+plot1 + plot2 + plot_layout(widths = c(1, 2))
+```
+
+After confirming the clusters, the clusters IDs can be assigned in order. Afterwards, the embeddings will display the cell names and further investigations can be conducted.
+
+```{r}
+new.cluster.ids <- c("Naive CD4 T", "CD14+ Mono", "Memory CD4 T", "B", "CD8 T", "FCGR3A+ Mono",
+    "NK", "DC", "Platelet")
+names(new.cluster.ids) <- levels(so)
+so <- RenameIdents(so, new.cluster.ids)
+DimPlot(so, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+Typically, cell cluster annotation is performed in this manner, which may be perceived as subjective and reliant on individual judgment. However, if this is a concern, there are alternative automated or semi-automated annotation methods available that are more objective and unbiased.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
