@@ -1,3 +1,4 @@
 scripts/run_NAR_scRNAseq.Rmd
 scripts/run_NAR_scRNAseq.html
 datasets/GSE144623_RAW.tar
+datasets/nakajima/paper/*
