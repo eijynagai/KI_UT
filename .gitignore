@@ -1,8 +1,3 @@
-scripts/FigS2.html
-scripts/FigS2.ipynb
-scripts/Fig4.html
-scripts/Fig4.ipynb
 scripts/run_NAR_scRNAseq.Rmd
 scripts/run_NAR_scRNAseq.html
 datasets/GSE144623_RAW.tar
-datasets/EEISP/
