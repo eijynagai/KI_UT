@@ -1,0 +1,91 @@
+suppressPackageStartupMessages({
+    
+    library(igraph)
+    library(tidyverse)
+
+})
+options(warn=-1)
+set.seed(1234)
+
+
+
+
+
+# load datasets from the directory
+net_files <- str_c("CDI_CM/EEISP_output/top10k/CDI", dir("CDI_CM/EEISP_output/top10k/CDI"), sep = "/")
+
+names(net_files) <- str_replace(
+  dir("CDI_CM/EEISP_output/top10k/CDI"),
+  pattern = "_CDI_10k.csv",
+  replacement = ""
+)
+
+# net_list: list with 11 df, corresponding to the 11 networks as edgelists
+net_list <- map(
+  net_files,
+  read_csv,
+  col_names = c("gene1", "gene2", "cdi"),
+  col_types = c("ccd"),
+  skip = 1
+)
+#net_files
+#net_list
+
+
+# The gene aliases are converted to official mgi symbols
+# if a gene name is converted to NA, change it back to its initial symbol.
+
+net_graphs <- map(
+  net_list,
+  ~ graph_from_edgelist(as.matrix(.[, 1:2]), directed = FALSE)
+)
+
+net_vertices <- map(net_graphs, ~ V(.)$name)
+net_vertices_off <- map(net_vertices, limma::alias2SymbolTable, species = "Mm")
+net_graphs <- pmap(list(net_graphs, net_vertices, net_vertices_off),
+                   ~ set_vertex_attr(graph = ..1,
+                                     name = "name",
+                                     value = replace(..3,
+                                                     which(is.na(..3)),
+                                                     ..2[which(is.na(..3))])))
+
+#saveRDS(net_graphs, "results/R_objects/10K_networks_igraphs.rds")
+
+
+
+# inspect graphs
+#plot( net_graphs$gbm_0h_cdi, vertex.size=0, vertex.label=NA, edge.arrow.size=0 )
+
+
+
+# Calculate centralities
+
+# Degree centrality
+net_k <- map(net_graphs, igraph::degree) 
+
+# Betweenness centrality
+net_bc <- map(net_graphs, betweenness)
+
+# Closeness centrality
+net_close <- map(net_graphs, closeness)
+
+# Pagerank centrality
+net_page <- map(net_graphs, ~ page_rank(.)$vector, directed = FALSE)
+
+# Eigen centrality
+net_eigen <- map(net_graphs, ~ eigen_centrality(.)$vector, directed = FALSE)
+
+
+
+
+# Hub score 
+net_hub<- map(net_graphs, hub_score)
+
+
+
+# save the environment
+save.image(file='CDI_centralities.RData')
+
+# quit
+quit(save="no")
+
